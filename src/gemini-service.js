@@ -37,7 +37,7 @@ export class GeminiService {
    */
   async _send(message, useGrounding = false, retryCount = 0) {
     const MAX_RETRIES = 3;
-    const FALLBACK_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+    const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash'];
 
     // Add user message to history (only on first attempt)
     if (retryCount === 0) {
@@ -92,7 +92,7 @@ export class GeminiService {
 
             // Notify about model change if callback exists
             if (this.onModelChange) {
-              this.onModelChange(fallbackModel, 'Gemini 3 Pro недоступен, переключаемся на Gemini 2.0 Flash');
+              this.onModelChange(fallbackModel, 'Базовая модель (Gemini 3 Pro) перегружена, временно переключаемся на ' + fallbackModel);
             }
 
             return this._send(message, useGrounding, retryCount);
