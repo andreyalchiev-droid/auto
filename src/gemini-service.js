@@ -80,8 +80,8 @@ export class GeminiService {
         const errorData = await response.json();
         const errorMessage = errorData.error?.message || `API Error: ${response.status}`;
 
-        // Check for quota/rate limit errors
-        if (response.status === 429 || errorMessage.includes('quota') || errorMessage.includes('rate') || errorMessage.includes('exceeded')) {
+        // Check for quota/rate limit/high demand errors
+        if (response.status === 429 || response.status === 503 || errorMessage.includes('quota') || errorMessage.includes('rate') || errorMessage.includes('exceeded') || errorMessage.includes('high demand')) {
           console.warn(`Rate limit hit (attempt ${retryCount + 1}/${MAX_RETRIES}):`, errorMessage);
 
           // Try fallback model if available and not already on fallback
