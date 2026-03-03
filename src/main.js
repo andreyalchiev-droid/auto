@@ -59,7 +59,7 @@ const elements = {
 
 // App State
 const state = {
-  apiKey: localStorage.getItem('autimatiks_apiKey') || 'AIzaSyDzRM1SXywdG6Mn_d-J9Y6v7lX_7B-lX9Y',
+  apiKey: localStorage.getItem('autimatiks_apiKey') || '',
   model: localStorage.getItem('autimatiks_model') || 'gemini-3-pro-preview',
   pipeline: null,
   geminiService: null,
