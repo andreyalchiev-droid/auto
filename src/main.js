@@ -6,7 +6,7 @@
 import './style.css';
 import { getGeminiService } from './gemini-service.js';
 import { Pipeline } from './pipeline.js';
-import { loadPrompts, savePrompts, getDefaultPrompts, getPromptMeta, getPromptOrder } from './prompts.js';
+import { loadPrompts, savePrompts, getDefaultPrompts } from './prompts.js';
 
 // DOM Elements
 const elements = {
@@ -17,12 +17,7 @@ const elements = {
 
   // Pipeline
   pipelineSection: document.getElementById('pipelineSection'),
-  stages: {
-    1: document.getElementById('stage1'),
-    2: document.getElementById('stage2'),
-    3: document.getElementById('stage3'),
-    4: document.getElementById('stage4'),
-  },
+  pipelineStages: document.getElementById('pipelineStages'),
 
   // Results
   resultsSection: document.getElementById('resultsSection'),
@@ -55,6 +50,7 @@ const elements = {
   closePrompts: document.getElementById('closePrompts'),
   savePrompts: document.getElementById('savePrompts'),
   resetPrompts: document.getElementById('resetPrompts'),
+  addPromptBtn: document.getElementById('addPromptBtn'),
 };
 
 // App State
@@ -63,6 +59,7 @@ const state = {
   model: localStorage.getItem('autimatiks_model') || 'gemini-3.1-pro-preview',
   pipeline: null,
   geminiService: null,
+  currentPromptsEditorState: [],
 };
 
 // Initialize
@@ -98,6 +95,7 @@ function setupEventListeners() {
   elements.closePrompts.addEventListener('click', hidePromptsModal);
   elements.savePrompts.addEventListener('click', handleSavePrompts);
   elements.resetPrompts.addEventListener('click', handleResetPrompts);
+  elements.addPromptBtn.addEventListener('click', handleAddPrompt);
   elements.promptsModal.addEventListener('click', (e) => {
     if (e.target === elements.promptsModal) hidePromptsModal();
   });
@@ -193,29 +191,82 @@ async function handleStart() {
     updateStatus(`Ожидание ${seconds}с (лимит API)...`, null);
   };
 
-  // Show pipeline UI
-  elements.inputSection.style.display = 'none';
-  elements.pipelineSection.style.display = 'block';
-  elements.resultsSection.style.display = 'none';
-  elements.chatSection.style.display = 'block';
-  elements.statusBar.style.display = 'flex';
-  elements.startBtn.disabled = true;
-  elements.startBtn.innerHTML = '<span class="btn-icon">⏳</span> Обработка...';
-
-  // Initialize status
-  updateStatus('Инициализация...', 1);
-
-  // Clear previous results
-  elements.chatMessages.innerHTML = '';
-  elements.resultsContent.textContent = '';
-
   try {
+    // Generate pipeline UI dynamically BEFORE start so we have the array of active prompts.
+    const prompts = loadPrompts().filter(p => p.enabled);
+    if (prompts.length === 0) {
+      showToast('Нет включенных промптов в настройках!', 'error');
+      return;
+    }
+    renderPipelineStages(prompts);
+
+    // Show pipeline UI
+    elements.inputSection.style.display = 'none';
+    elements.pipelineSection.style.display = 'block';
+    elements.resultsSection.style.display = 'none';
+    elements.chatSection.style.display = 'block';
+    elements.statusBar.style.display = 'flex';
+    elements.startBtn.disabled = true;
+    elements.startBtn.innerHTML = '<span class="btn-icon">⏳</span> Обработка...';
+
+    // Initialize status
+    updateStatus('Инициализация...', 1, prompts.length);
+
+    // Clear previous results
+    elements.chatMessages.innerHTML = '';
+    elements.resultsContent.textContent = '';
+
     await state.pipeline.start(text);
+
+    // Finished successfully
+    hideStatusBar();
+    elements.resultsSection.style.display = 'block';
+    showFinalResult();
+
   } catch (error) {
     showToast(`Ошибка: ${error.message}`, 'error');
     hideStatusBar();
     resetUI();
   }
+}
+
+// Generate Pipeline HTML
+function renderPipelineStages(prompts) {
+  elements.pipelineStages.innerHTML = '';
+
+  prompts.forEach((prompt, index) => {
+    // Stage container
+    const stageDiv = document.createElement('div');
+    stageDiv.className = 'stage';
+    stageDiv.dataset.stage = index + 1;
+
+    // Indicator
+    const indicator = document.createElement('div');
+    indicator.className = 'stage-indicator';
+    indicator.innerHTML = `<span class="stage-number">${index + 1}</span><span class="stage-status"></span>`;
+
+    // Content
+    const content = document.createElement('div');
+    content.className = 'stage-content';
+
+    // Need a clean short title based on stage purpose
+    const safeTitle = prompt.label.split(':').pop().trim();
+    const shortDesc = prompt.description || 'Кастомный промпт';
+
+    content.innerHTML = `<h3 class="stage-title">${safeTitle}</h3><p class="stage-desc">${shortDesc}</p>`;
+
+    stageDiv.appendChild(indicator);
+    stageDiv.appendChild(content);
+
+    elements.pipelineStages.appendChild(stageDiv);
+
+    // Connector lines between stages
+    if (index < prompts.length - 1) {
+      const connector = document.createElement('div');
+      connector.className = 'stage-connector';
+      elements.pipelineStages.appendChild(connector);
+    }
+  });
 }
 
 // Continue Pipeline
@@ -233,42 +284,31 @@ async function handleContinue() {
 
 // Stage Change Handler
 function handleStageChange(stage, status) {
-  // Update all stages
-  for (let i = 1; i <= 4; i++) {
-    const stageEl = elements.stages[i];
-    stageEl.classList.remove('active', 'completed');
+  const stageElements = elements.pipelineStages.querySelectorAll('.stage');
+  const totalStages = stageElements.length;
 
-    if (i < stage) {
-      stageEl.classList.add('completed');
-    } else if (i === stage) {
-      if (status === 'active') {
-        stageEl.classList.add('active');
-      } else if (status === 'completed') {
-        stageEl.classList.add('completed');
-      }
+  // Update all stages classes
+  stageElements.forEach((el, index) => {
+    const elStage = index + 1;
+    el.classList.remove('active', 'completed');
+    if (elStage < stage) {
+      el.classList.add('completed');
+    } else if (elStage === stage) {
+      if (status === 'active') el.classList.add('active');
+      if (status === 'completed') el.classList.add('completed');
+    }
+  });
+
+  // Update results title based on stage
+  if (state.pipeline && state.pipeline.prompts) {
+    const currentPrompt = state.pipeline.prompts[stage - 1];
+    if (currentPrompt) {
+      elements.resultsTitle.textContent = currentPrompt.label;
     }
   }
 
-
-
-  // Update results title based on stage
-  const titles = {
-    1: '🔍 Результаты поиска',
-    2: '✍️ Отредактированные блоки',
-    3: '🔗 Объединённый текст',
-    4: '📝 Готовый результат',
-  };
-  elements.resultsTitle.textContent = titles[stage] || 'Результат';
-
   // Update status bar stage
-  updateStatus(null, stage);
-
-  // If all stages complete, show final result
-  if (stage === 4 && status === 'completed') {
-    hideStatusBar();
-    elements.resultsSection.style.display = 'block';
-    showFinalResult();
-  }
+  updateStatus(null, stage, totalStages);
 }
 
 // Progress Handler
@@ -287,10 +327,16 @@ function handleProgress(message) {
 }
 
 // Update Status Bar
-function updateStatus(text, stage = null) {
-  elements.statusText.textContent = text;
-  if (stage !== null) {
-    elements.statusStage.textContent = `Этап ${stage} из 4`;
+function updateStatus(text, stage = null, total = null) {
+  if (text !== null) elements.statusText.textContent = text;
+
+  if (stage !== null && total !== null) {
+    elements.statusStage.textContent = `Этап ${stage} из ${total}`;
+  } else if (stage !== null) {
+    const parts = elements.statusStage.textContent.split(' из ');
+    if (parts.length === 2) {
+      elements.statusStage.textContent = `Этап ${stage} из ${parts[1]}`;
+    }
   }
 }
 
@@ -355,13 +401,9 @@ function handleMessage(role, text) {
 
 // Format message with markdown support
 function formatMessage(text) {
-  // Basic markdown formatting
   return text
-    // Bold
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    // Italic
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Line breaks
     .replace(/\n/g, '<br>');
 }
 
@@ -369,17 +411,25 @@ function formatMessage(text) {
 function showFinalResult() {
   const result = state.pipeline.getFinalResult();
 
-  elements.resultsContent.innerHTML = `
-    <div style="margin-bottom: 20px;">
-      <h3 style="color: var(--accent-primary); margin-bottom: 10px;">Заголовок:</h3>
-      <p>${formatMessage(result.title)}</p>
-    </div>
-    <div>
-      <h3 style="color: var(--accent-primary); margin-bottom: 10px;">Текст:</h3>
-      <div>${formatMessage(result.text)}</div>
-    </div>
-  `;
+  let html = '';
+  if (result.title) {
+    html += `
+        <div style="margin-bottom: 20px;">
+          <h3 style="color: var(--accent-primary); margin-bottom: 10px;">Заголовок:</h3>
+          <p>${formatMessage(result.title)}</p>
+        </div>
+      `;
+  }
+  if (result.text) {
+    html += `
+        <div>
+          <h3 style="color: var(--accent-primary); margin-bottom: 10px;">Текст:</h3>
+          <div>${formatMessage(result.text)}</div>
+        </div>
+      `;
+  }
 
+  elements.resultsContent.innerHTML = html;
   elements.continueBtn.style.display = 'none';
 
   // Add Log Button if not exists
@@ -413,31 +463,25 @@ function downloadLog() {
 async function handleCopy() {
   const result = state.pipeline?.getFinalResult();
 
-  // Helper to strip markdown
   const stripMarkdown = (text) => {
     if (!text) return '';
     return text
-      .replace(/\*\*(.+?)\*\*/g, '$1') // Bold **text** -> text
-      .replace(/\*(.+?)\*/g, '$1')     // Italic *text* -> text
-      .replace(/__((?:.|\n)+?)__/g, '$1') // Bold __text__ -> text
-      .replace(/_((?:.|\n)+?)_/g, '$1')   // Italic _text_ -> text
-      .replace(/`(.+?)`/g, '$1')       // Code `text` -> text
-      .replace(/^#+\s+/gm, '')          // Headers
-      .replace(/\[(.+?)\]\(.+?\)/g, '$1'); // Links [text](url) -> text
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/__((?:.|\n)+?)__/g, '$1')
+      .replace(/_((?:.|\n)+?)_/g, '$1')
+      .replace(/`(.+?)`/g, '$1')
+      .replace(/^#+\s+/gm, '')
+      .replace(/\[(.+?)\]\(.+?\)/g, '$1');
   };
 
-  if (!result) {
-    // Copy current visible content
+  if (!result || (!result.title && !result.text)) {
     const content = elements.resultsContent.innerText;
-    // innerText should already be plain text from the DOM, but let's be safe if there are artifacts
-    // Actually innerText gives the rendered text, so <strong>foo</strong> becomes foo. 
-    // However, if the text itself contained * chars that weren't rendered as HTML, they will be there.
-    // Given the user flow, the result object is usually available when they want to copy the final artifact.
     await copyToClipboard(content);
     return;
   }
 
-  const textToCopy = `${stripMarkdown(result.title)}\n\n${stripMarkdown(result.text)}`;
+  const textToCopy = [stripMarkdown(result.title), stripMarkdown(result.text)].filter(Boolean).join('\n\n');
   await copyToClipboard(textToCopy);
 }
 
@@ -479,15 +523,16 @@ function showToast(message, type = 'info') {
   toast.innerHTML = `<span>${icons[type] || ''}</span> ${message}`;
   container.appendChild(toast);
 
-  // Auto remove
   setTimeout(() => {
     toast.style.animation = 'slideInRight var(--transition-normal) reverse';
     setTimeout(() => toast.remove(), 250);
   }, 3000);
 }
+
 // ===== Prompts Editor =====
 
 function showPromptsModal() {
+  state.currentPromptsEditorState = loadPrompts();
   renderPromptsForm();
   elements.promptsModal.style.display = 'flex';
 }
@@ -496,59 +541,158 @@ function hidePromptsModal() {
   elements.promptsModal.style.display = 'none';
 }
 
-/**
- * Render the prompts form dynamically
- */
-function renderPromptsForm(promptsOverride) {
-  const currentPrompts = promptsOverride || loadPrompts();
+function handleAddPrompt() {
+  const newId = 'custom_' + Date.now();
+  state.currentPromptsEditorState.push({
+    id: newId,
+    type: 'standard',
+    label: '✨ Пользовательский промпт',
+    description: 'Ваш собственный шаг обработки',
+    text: 'Сделай следующее: ',
+    enabled: true,
+    isCustom: true
+  });
+  renderPromptsForm();
+  // scroll to bottom
+  setTimeout(() => {
+    elements.promptsModalBody.scrollTop = elements.promptsModalBody.scrollHeight;
+  }, 100);
+}
+
+function renderPromptsForm() {
+  const currentPrompts = state.currentPromptsEditorState;
   const defaults = getDefaultPrompts();
-  const meta = getPromptMeta();
-  const order = getPromptOrder();
 
   elements.promptsModalBody.innerHTML = '';
 
-  for (const key of order) {
-    const isModified = currentPrompts[key] !== defaults[key];
+  currentPrompts.forEach((prompt, index) => {
+    const isCustom = prompt.isCustom;
+    let isModified = false;
+
+    if (!isCustom) {
+      const def = defaults.find(d => d.id === prompt.id);
+      if (def && prompt.text !== def.text) {
+        isModified = true;
+      }
+    }
 
     const group = document.createElement('div');
     group.className = 'prompt-group' + (isModified ? ' prompt-modified' : '');
+    if (!prompt.enabled) {
+      group.classList.add('prompt-disabled');
+      group.style.opacity = '0.6';
+    }
 
     const header = document.createElement('div');
     header.className = 'prompt-group-header';
 
+    const headerLeft = document.createElement('div');
+    headerLeft.style.display = 'flex';
+    headerLeft.style.alignItems = 'center';
+    headerLeft.style.gap = 'var(--space-md)';
+
+    // Toggle switch
+    const toggleContainer = document.createElement('label');
+    toggleContainer.className = 'toggle-switch';
+    toggleContainer.innerHTML = `
+        <input type="checkbox" id="toggle_${prompt.id}" ${prompt.enabled ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+    `;
+
+    const toggleInput = toggleContainer.querySelector('input');
+    toggleInput.addEventListener('change', (e) => {
+      prompt.enabled = e.target.checked;
+      if (prompt.enabled) {
+        group.classList.remove('prompt-disabled');
+        group.style.opacity = '1';
+      } else {
+        group.classList.add('prompt-disabled');
+        group.style.opacity = '0.6';
+      }
+    });
+
     const label = document.createElement('label');
-    label.setAttribute('for', `prompt_${key}`);
-    label.textContent = meta[key].label;
+    label.setAttribute('for', `prompt_${prompt.id}`);
+    label.textContent = prompt.label;
 
-    const badge = document.createElement('span');
-    badge.className = 'prompt-badge';
-    badge.textContent = isModified ? '✏️ изменён' : '✅ по умолчанию';
+    headerLeft.appendChild(toggleContainer);
+    headerLeft.appendChild(label);
 
-    header.appendChild(label);
-    header.appendChild(badge);
+    const headerRight = document.createElement('div');
+    headerRight.style.display = 'flex';
+    headerRight.style.alignItems = 'center';
+    headerRight.style.gap = 'var(--space-sm)';
 
-    const desc = document.createElement('p');
-    desc.className = 'prompt-description';
-    desc.textContent = meta[key].description;
+    if (!isCustom) {
+      const badge = document.createElement('span');
+      badge.className = 'prompt-badge';
+      badge.textContent = isModified ? '✏️ изменён' : '✅ по умолчанию';
+      headerRight.appendChild(badge);
+    } else {
+      const delBtn = document.createElement('button');
+      delBtn.innerHTML = '🗑️';
+      delBtn.style.background = 'none';
+      delBtn.style.border = 'none';
+      delBtn.style.cursor = 'pointer';
+      delBtn.title = 'Удалить';
+      delBtn.onclick = () => {
+        if (confirm('Удалить этот промпт?')) {
+          state.currentPromptsEditorState.splice(index, 1);
+          renderPromptsForm();
+        }
+      };
+      headerRight.appendChild(delBtn);
+    }
+
+    header.appendChild(headerLeft);
+    header.appendChild(headerRight);
+
+    let desc;
+    if (isCustom) {
+      desc = document.createElement('input');
+      desc.className = 'text-field';
+      desc.style.marginBottom = 'var(--space-md)';
+      desc.style.padding = 'var(--space-sm)';
+      desc.value = prompt.label;
+      desc.placeholder = 'Название этапа';
+      desc.addEventListener('input', () => {
+        prompt.label = desc.value;
+      });
+    } else {
+      desc = document.createElement('p');
+      desc.className = 'prompt-description';
+      desc.textContent = prompt.description;
+    }
 
     const textarea = document.createElement('textarea');
-    textarea.id = `prompt_${key}`;
+    textarea.id = `prompt_${prompt.id}`;
     textarea.className = 'prompt-textarea';
-    textarea.value = currentPrompts[key];
-    textarea.dataset.key = key;
+    textarea.value = prompt.text;
+    textarea.dataset.id = prompt.id;
     textarea.spellcheck = false;
+
+    // Disable textarea if prompt is disabled
+    textarea.disabled = !prompt.enabled;
+    toggleInput.addEventListener('change', (e) => {
+      textarea.disabled = !e.target.checked;
+    });
 
     // Character count
     const charCount = document.createElement('div');
     charCount.className = 'prompt-char-count';
-    charCount.textContent = `${currentPrompts[key].length} символов`;
+    charCount.textContent = `${prompt.text.length} символов`;
 
     textarea.addEventListener('input', () => {
+      prompt.text = textarea.value;
       charCount.textContent = `${textarea.value.length} символов`;
-      // Update modified badge in real time
-      const modified = textarea.value !== defaults[key];
-      group.classList.toggle('prompt-modified', modified);
-      badge.textContent = modified ? '✏️ изменён' : '✅ по умолчанию';
+
+      if (!isCustom) {
+        const def = defaults.find(d => d.id === prompt.id);
+        const modified = textarea.value !== (def ? def.text : '');
+        group.classList.toggle('prompt-modified', modified);
+        const badge = headerRight.querySelector('.prompt-badge');
+        if (badge) badge.textContent = modified ? '✏️ изменён' : '✅ по умолчанию';
+      }
     });
 
     group.appendChild(header);
@@ -556,24 +700,11 @@ function renderPromptsForm(promptsOverride) {
     group.appendChild(textarea);
     group.appendChild(charCount);
     elements.promptsModalBody.appendChild(group);
-  }
+  });
 }
 
-/**
- * Save prompts from the form
- */
 function handleSavePrompts() {
-  const order = getPromptOrder();
-  const prompts = {};
-
-  for (const key of order) {
-    const textarea = document.getElementById(`prompt_${key}`);
-    if (textarea) {
-      prompts[key] = textarea.value;
-    }
-  }
-
-  if (savePrompts(prompts)) {
+  if (savePrompts(state.currentPromptsEditorState)) {
     showToast('Промпты сохранены! Новые промпты будут использованы при следующем запуске.', 'success');
     hidePromptsModal();
   } else {
@@ -581,13 +712,10 @@ function handleSavePrompts() {
   }
 }
 
-/**
- * Reset prompts to defaults
- */
 function handleResetPrompts() {
-  if (confirm('Сбросить все промпты к значениям по умолчанию?')) {
-    const defaults = getDefaultPrompts();
-    renderPromptsForm(defaults);
+  if (confirm('Сбросить все промпты к значениям по умолчанию? \nВсе пользовательские промпты будут удалены.')) {
+    state.currentPromptsEditorState = getDefaultPrompts();
+    renderPromptsForm();
     showToast('Промпты сброшены. Нажмите «Сохранить» чтобы применить.', 'info');
   }
 }

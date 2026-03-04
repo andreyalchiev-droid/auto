@@ -64,50 +64,8 @@
 
       <!-- Pipeline Progress -->
       <section class="pipeline-section" id="pipelineSection" style="display: none;">
-        <div class="pipeline-stages">
-          <div class="stage" data-stage="1" id="stage1">
-            <div class="stage-indicator">
-              <span class="stage-number">1</span>
-              <span class="stage-status"></span>
-            </div>
-            <div class="stage-content">
-              <h3 class="stage-title">🔍 Гуглим инфу</h3>
-              <p class="stage-desc">Проверка названий и поиск информации</p>
-            </div>
-          </div>
-          <div class="stage-connector"></div>
-          <div class="stage" data-stage="2" id="stage2">
-            <div class="stage-indicator">
-              <span class="stage-number">2</span>
-              <span class="stage-status"></span>
-            </div>
-            <div class="stage-content">
-              <h3 class="stage-title">✍️ Редактирование</h3>
-              <p class="stage-desc">Из разговорной речи в читабельный текст</p>
-            </div>
-          </div>
-          <div class="stage-connector"></div>
-          <div class="stage" data-stage="3" id="stage3">
-            <div class="stage-indicator">
-              <span class="stage-number">3</span>
-              <span class="stage-status"></span>
-            </div>
-            <div class="stage-content">
-              <h3 class="stage-title">🔗 Объединение</h3>
-              <p class="stage-desc">Сборка блоков в единый текст</p>
-            </div>
-          </div>
-          <div class="stage-connector"></div>
-          <div class="stage" data-stage="4" id="stage4">
-            <div class="stage-indicator">
-              <span class="stage-number">4</span>
-              <span class="stage-status"></span>
-            </div>
-            <div class="stage-content">
-              <h3 class="stage-title">💡 Заголовок</h3>
-              <p class="stage-desc">Генерация заголовка "Про ..."</p>
-            </div>
-          </div>
+        <div class="pipeline-stages" id="pipelineStages">
+          <!-- Dynamically inserted by JS -->
         </div>
       </section>
 
@@ -142,6 +100,11 @@
         </div>
         <div class="modal-body modal-body-scroll" id="promptsModalBody">
           <!-- Prompt fields will be rendered dynamically by JS -->
+        </div>
+        <div style="padding: 0 var(--space-lg) var(--space-md);">
+          <button class="secondary-btn" id="addPromptBtn" style="width: 100%; justify-content: center;">
+            <span>➕</span> Добавить пользовательский промпт
+          </button>
         </div>
         <div class="modal-footer modal-footer-prompts">
           <button class="secondary-btn" id="resetPrompts">
