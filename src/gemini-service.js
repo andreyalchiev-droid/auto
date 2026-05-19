@@ -4,7 +4,7 @@
  */
 
 export class GeminiService {
-  constructor(apiKey, model = 'gemini-2.5-flash') {
+  constructor(apiKey, model = 'gemini-3.1-pro-preview') {
     this.apiKey = apiKey;
     this.model = model;
     this.conversationHistory = [];
@@ -79,7 +79,7 @@ export class GeminiService {
         temperature: this.model.includes('gemini-3') ? 1.0 : 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 8192,
+        maxOutputTokens: this._getMaxOutputTokens(),
       }
     };
 
@@ -106,19 +106,10 @@ export class GeminiService {
       const apiError = this._buildApiError(response, errorData, errorMessage);
 
       if (this._isRetryable(response.status, errorMessage)) {
-        const fallbackModel = this._getFallbackModel();
-        if (fallbackModel && retryCount === 0) {
-          this.model = fallbackModel;
-          if (this.onModelChange) {
-            this.onModelChange(fallbackModel, `Gemini вернул ${response.status}. Переключаюсь на ${fallbackModel} и продолжаю.`);
-          }
-          return this._requestWithRetries(contents, useGrounding, retryCount + 1);
-        }
-
         if (retryCount < MAX_RETRIES) {
           const delay = this._getRetryDelay(errorMessage, retryCount);
           if (this.onRetryWait) {
-            this.onRetryWait(Math.ceil(delay / 1000), retryCount + 1, MAX_RETRIES);
+            this.onRetryWait(Math.ceil(delay / 1000), retryCount + 1, MAX_RETRIES, 'rate');
           }
 
           await this._delay(delay);
@@ -130,18 +121,27 @@ export class GeminiService {
     }
 
     const data = await response.json();
-    const assistantMessage = data.candidates?.[0]?.content;
+    const candidate = data.candidates?.[0];
+    const assistantMessage = candidate?.content;
+    const responseText = this._extractText(assistantMessage);
 
-    if (!assistantMessage) {
-      const finishReason = data.candidates?.[0]?.finishReason;
-      throw new Error(finishReason ? `Gemini stopped without text: ${finishReason}` : 'Empty response from API');
+    if (!responseText.trim()) {
+      const emptyResponseError = this._buildEmptyResponseError(data);
+
+      if (this._shouldRetryEmpty(emptyResponseError, retryCount, MAX_RETRIES)) {
+        const delay = this._getRetryDelay(emptyResponseError.message, retryCount);
+        if (this.onRetryWait) {
+          this.onRetryWait(Math.ceil(delay / 1000), retryCount + 1, MAX_RETRIES, 'empty');
+        }
+
+        await this._delay(delay);
+        return this._requestWithRetries(contents, useGrounding, retryCount + 1);
+      }
+
+      throw emptyResponseError;
     }
 
-    const responseText = assistantMessage.parts
-      .map(part => part.text || '')
-      .join('');
-
-    const groundingMetadata = data.candidates?.[0]?.groundingMetadata;
+    const groundingMetadata = candidate?.groundingMetadata;
 
     return {
       text: responseText,
@@ -164,6 +164,58 @@ export class GeminiService {
     }
   }
 
+  _extractText(content) {
+    return (content?.parts || [])
+      .map(part => part.text || '')
+      .join('');
+  }
+
+  _buildEmptyResponseError(data) {
+    const candidate = data.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    const finishMessage = candidate?.finishMessage;
+    const promptFeedback = data.promptFeedback;
+    const blockReason = promptFeedback?.blockReason;
+    const blockReasonMessage = promptFeedback?.blockReasonMessage;
+    const safetyDetails = this._formatSafetyRatings(candidate?.safetyRatings || promptFeedback?.safetyRatings);
+
+    const parts = [];
+    if (blockReason) {
+      parts.push(`запрос заблокирован фильтром Gemini: ${blockReason}`);
+    } else if (finishReason) {
+      parts.push(`Gemini остановился без текста: ${finishReason}`);
+    } else {
+      parts.push('Gemini вернул пустой ответ без текста');
+    }
+
+    if (finishMessage) parts.push(finishMessage);
+    if (blockReasonMessage) parts.push(blockReasonMessage);
+    if (safetyDetails) parts.push(`safety: ${safetyDetails}`);
+
+    const error = new Error(parts.join('. '));
+    error.name = 'GeminiEmptyResponseError';
+    error.finishReason = finishReason || null;
+    error.blockReason = blockReason || null;
+    error.details = data;
+    return error;
+  }
+
+  _formatSafetyRatings(ratings = []) {
+    if (!Array.isArray(ratings) || ratings.length === 0) return '';
+
+    return ratings
+      .filter(rating => rating?.blocked || ['MEDIUM', 'HIGH'].includes(rating?.probability))
+      .map(rating => `${rating.category}:${rating.probability}${rating.blocked ? ':blocked' : ''}`)
+      .join(', ');
+  }
+
+  _shouldRetryEmpty(error, retryCount, maxRetries) {
+    if (retryCount >= maxRetries) return false;
+
+    return !['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'].includes(error.finishReason)
+      && !error.blockReason;
+  }
+
   _buildApiError(response, errorData, errorMessage) {
     const status = errorData.error?.status || response.statusText || 'UNKNOWN';
     const message = `Gemini API ${response.status} ${status}: ${errorMessage}`;
@@ -184,16 +236,9 @@ export class GeminiService {
       || normalized.includes('deadline');
   }
 
-  _getFallbackModel() {
-    if (this.model.includes('gemini-3') || this.model.includes('pro-preview')) {
-      return 'gemini-2.5-flash';
-    }
-
-    if (this.model === 'gemini-2.5-flash') {
-      return 'gemini-2.5-flash-lite';
-    }
-
-    return null;
+  _getMaxOutputTokens() {
+    if (this.model.includes('gemini-3')) return 32768;
+    return 16384;
   }
 
   _getRetryDelay(message, retryCount) {

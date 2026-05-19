@@ -64,14 +64,12 @@ const state = {
 
 const supportedModels = new Set([
   'gemini-3.1-pro-preview',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
 ]);
 
 // Initialize
 function init() {
   if (!supportedModels.has(state.model)) {
-    state.model = 'gemini-2.5-flash';
+    state.model = 'gemini-3.1-pro-preview';
     localStorage.setItem('autimatiks_model', state.model);
   }
 
@@ -190,14 +188,14 @@ async function handleStart() {
   state.pipeline.onMessage = handleMessage;
   state.pipeline.onTyping = handleTyping;
 
-  // Setup model fallback notification
-  state.geminiService.onModelChange = (newModel, reason) => {
-    showToast(`⚠️ ${reason}`, 'warning');
-    updateStatus(`Переключено на ${newModel}`, null);
-  };
-
   // Setup retry wait notification with countdown
-  state.geminiService.onRetryWait = (seconds, attempt, maxAttempts) => {
+  state.geminiService.onRetryWait = (seconds, attempt, maxAttempts, reason) => {
+    if (reason === 'empty') {
+      showToast(`⏳ Gemini вернул пустой ответ, повторяю через ${seconds}с (попытка ${attempt}/${maxAttempts})`, 'info');
+      updateStatus(`Пустой ответ Gemini. Повтор через ${seconds}с...`, null);
+      return;
+    }
+
     showToast(`⏳ Rate limit, жду ${seconds}с (попытка ${attempt}/${maxAttempts})`, 'info');
     updateStatus(`Ожидание ${seconds}с (лимит API)...`, null);
   };
