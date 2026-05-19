@@ -119,20 +119,16 @@ ${this.currentText}`;
         this._emitProgress(`Разбито на ${this.chunks.length} блоков. Начинаю редактирование...`);
 
         while (this.currentChunkIndex < this.chunks.length) {
-            const batchSize = Math.min(2, this.chunks.length - this.currentChunkIndex);
-            const batch = this.chunks.slice(this.currentChunkIndex, this.currentChunkIndex + batchSize);
+            const chunk = this.chunks[this.currentChunkIndex];
 
-            this._emitProgress(`Обработка блоков ${this.currentChunkIndex + 1}-${this.currentChunkIndex + batchSize} из ${this.chunks.length}...`);
+            this._emitProgress(`Обработка блока ${this.currentChunkIndex + 1} из ${this.chunks.length}...`);
 
-            const message = this._buildChunkStageMessage(prompt, batch);
-            this._emitMessage('user', message);
-
-            const result = await this.gemini.send(message, { useHistory: false });
-            this._emitMessage('assistant', result.text);
+            const result = await this._sendChunk(prompt, chunk);
             editedChunks.push(result.text);
+
             this.stageResults.editedChunks = editedChunks;
             this.stageResults.body = editedChunks.join('\n\n---\n\n');
-            this.currentChunkIndex += batchSize;
+            this.currentChunkIndex += 1;
 
             if (this.currentChunkIndex < this.chunks.length) {
                 await this._delay(this.requestDelayMs);
@@ -142,6 +138,22 @@ ${this.currentText}`;
         this.currentText = editedChunks.join('\n\n---\n\n');
         this.stageResults.editedChunks = editedChunks;
         this.stageResults.body = this.currentText;
+    }
+
+    async _sendChunk(prompt, chunk) {
+        const message = this._buildChunkStageMessage(prompt, chunk);
+        this._emitMessage('user', message);
+
+        try {
+            const result = await this.gemini.send(message, { useHistory: false });
+            this._emitMessage('assistant', result.text);
+            return result;
+        } catch (error) {
+            if (this._isProhibitedContentError(error)) {
+                error.message = `Gemini заблокировал блок ${this.currentChunkIndex + 1}: ${error.message}`;
+            }
+            throw error;
+        }
     }
 
     async runCombineStage(prompt) {
@@ -218,7 +230,7 @@ ${this.originalText}
 ${this.currentText || this.originalText}`;
     }
 
-    _buildChunkStageMessage(prompt, batch) {
+    _buildChunkStageMessage(prompt, chunk) {
         const previousOriginalBlock = this.currentChunkIndex > 0
             ? this._formatPreviousBlock(this.chunks[this.currentChunkIndex - 1])
             : 'Нет.';
@@ -226,19 +238,19 @@ ${this.currentText || this.originalText}`;
         return `${prompt.text}${this._getOutputRule(prompt)}
 
 ВАЖНО:
-- Сейчас редактируй только текущие блоки.
+- Сейчас редактируй только текущий блок.
 - Предыдущий блок нужен только как контекст, чтобы не потерять связь мысли.
 - Не редактируй предыдущий блок, не возвращай его в ответе и не добавляй из него новые смыслы.
 - Не пересобирай заново уже готовые блоки.
-- Верни результат только для текущих блоков.
+- Верни результат только для текущего блока.
 
 ПРЕДЫДУЩИЙ ОРИГИНАЛЬНЫЙ БЛОК ДЛЯ КОНТЕКСТА:
 
 ${previousOriginalBlock}
 
-ТЕКУЩИЕ БЛОКИ ДЛЯ РЕДАКТИРОВАНИЯ:
+ТЕКУЩИЙ БЛОК ДЛЯ РЕДАКТИРОВАНИЯ:
 
-${batch.join('\n\n---\n\n')}`;
+${chunk}`;
     }
 
     _formatPreviousBlock(text) {
@@ -248,6 +260,12 @@ ${batch.join('\n\n---\n\n')}`;
     _truncateText(text, maxLength) {
         if (!text || text.length <= maxLength) return text || '';
         return `${text.slice(0, maxLength).trim()}...`;
+    }
+
+    _isProhibitedContentError(error) {
+        return error?.blockReason === 'PROHIBITED_CONTENT'
+            || error?.finishReason === 'PROHIBITED_CONTENT'
+            || error?.message?.includes('PROHIBITED_CONTENT');
     }
 
     _getOutputRule(prompt) {

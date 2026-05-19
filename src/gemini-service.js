@@ -89,16 +89,33 @@ export class GeminiService {
       }];
     }
 
-    const response = await fetch(
-      `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody)
+    let response;
+    try {
+      response = await fetch(
+        `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody)
+        }
+      );
+    } catch (error) {
+      const networkError = this._buildNetworkError(error);
+
+      if (this._isRetryableNetworkError(error) && retryCount < MAX_RETRIES) {
+        const delay = this._getRetryDelay(networkError.message, retryCount);
+        if (this.onRetryWait) {
+          this.onRetryWait(Math.ceil(delay / 1000), retryCount + 1, MAX_RETRIES, 'network');
+        }
+
+        await this._delay(delay);
+        return this._requestWithRetries(contents, useGrounding, retryCount + 1);
       }
-    );
+
+      throw networkError;
+    }
 
     if (!response.ok) {
       const errorData = await this._readError(response);
@@ -223,6 +240,23 @@ export class GeminiService {
     error.status = response.status;
     error.details = errorData;
     return error;
+  }
+
+  _buildNetworkError(error) {
+    const message = error?.message || 'network request failed';
+    const apiError = new Error(`Gemini API network error: ${message}`);
+    apiError.name = 'GeminiNetworkError';
+    apiError.cause = error;
+    return apiError;
+  }
+
+  _isRetryableNetworkError(error) {
+    const code = error?.cause?.code || error?.code || '';
+    const message = (error?.message || '').toLowerCase();
+
+    return error?.name === 'TypeError'
+      || message.includes('fetch failed')
+      || ['UND_ERR_SOCKET', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(code);
   }
 
   _isRetryable(status, message) {
