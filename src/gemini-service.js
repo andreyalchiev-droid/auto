@@ -4,10 +4,11 @@
  */
 
 export class GeminiService {
-  constructor(apiKey, model = 'gemini-2.0-flash') {
+  constructor(apiKey, model = 'gemini-2.5-flash') {
     this.apiKey = apiKey;
     this.model = model;
     this.conversationHistory = [];
+    this.requestLog = [];
     this.baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models';
   }
 
@@ -16,144 +17,192 @@ export class GeminiService {
    */
   reset() {
     this.conversationHistory = [];
+    this.requestLog = [];
   }
 
   /**
    * Send message with Google Search grounding (for Stage 1)
    */
-  async sendWithSearch(message) {
-    return this._send(message, true);
+  async sendWithSearch(message, options = {}) {
+    return this._send(message, true, options);
   }
 
   /**
    * Send regular message (for Stages 2-4)
    */
-  async send(message) {
-    return this._send(message, false);
+  async send(message, options = {}) {
+    return this._send(message, false, options);
   }
 
   /**
-   * Internal send method with retry logic
+   * Internal send method with retry logic.
+   * useHistory=false keeps the user's semantic context explicit without
+   * resending the whole raw API chat on every pipeline step.
    */
-  async _send(message, useGrounding = false, retryCount = 0) {
-    const MAX_RETRIES = 3;
-    const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  async _send(message, useGrounding = false, options = {}) {
+    const useHistory = options.useHistory !== false;
+    const userMessage = {
+      role: 'user',
+      parts: [{ text: message }]
+    };
 
-    // Add user message to history (only on first attempt)
-    if (retryCount === 0) {
-      this.conversationHistory.push({
-        role: 'user',
-        parts: [{ text: message }]
-      });
+    if (useHistory) {
+      this.conversationHistory.push(userMessage);
     }
 
+    const contents = useHistory ? this.conversationHistory : [userMessage];
+
+    try {
+      const result = await this._requestWithRetries(contents, useGrounding);
+      const assistantMessage = result.assistantMessage;
+
+      if (useHistory) {
+        this.conversationHistory.push(assistantMessage);
+      }
+
+      this.requestLog.push(userMessage, assistantMessage);
+
+      return result;
+    } catch (error) {
+      if (useHistory) {
+        this.conversationHistory.pop();
+      }
+      throw error;
+    }
+  }
+
+  async _requestWithRetries(contents, useGrounding = false, retryCount = 0) {
+    const MAX_RETRIES = 5;
     const requestBody = {
-      contents: this.conversationHistory,
+      contents,
       generationConfig: {
-        temperature: 0.7,
+        temperature: this.model.includes('gemini-3') ? 1.0 : 0.7,
         topK: 40,
         topP: 0.95,
         maxOutputTokens: 8192,
       }
     };
 
-    // Add grounding for search capability
     if (useGrounding) {
       requestBody.tools = [{
         googleSearch: {}
       }];
     }
 
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody)
-        }
-      );
+    const response = await fetch(
+      `${this.baseUrl}/${this.model}:generateContent?key=${this.apiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody)
+      }
+    );
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        const errorMessage = errorData.error?.message || `API Error: ${response.status}`;
+    if (!response.ok) {
+      const errorData = await this._readError(response);
+      const errorMessage = errorData.error?.message || `API Error: ${response.status}`;
+      const apiError = this._buildApiError(response, errorData, errorMessage);
 
-        // Check for quota/rate limit/high demand errors
-        if (response.status === 429 || response.status === 503 || errorMessage.includes('quota') || errorMessage.includes('rate') || errorMessage.includes('exceeded') || errorMessage.includes('high demand')) {
-          console.warn(`Rate limit hit (attempt ${retryCount + 1}/${MAX_RETRIES}):`, errorMessage);
-
-          // Try fallback model if available and not already on fallback
-          if (this.model.includes('gemini-3') || this.model.includes('pro-preview')) {
-            const fallbackModel = FALLBACK_MODELS[0];
-            console.warn(`Switching to fallback model: ${fallbackModel}`);
-            this.model = fallbackModel;
-
-            // Notify about model change if callback exists
-            if (this.onModelChange) {
-              this.onModelChange(fallbackModel, 'Базовая модель (Gemini 3 Pro) перегружена, временно переключаемся на ' + fallbackModel);
-            }
-
-            return this._send(message, useGrounding, retryCount);
+      if (this._isRetryable(response.status, errorMessage)) {
+        const fallbackModel = this._getFallbackModel();
+        if (fallbackModel && retryCount === 0) {
+          this.model = fallbackModel;
+          if (this.onModelChange) {
+            this.onModelChange(fallbackModel, `Gemini вернул ${response.status}. Переключаюсь на ${fallbackModel} и продолжаю.`);
           }
-
-          // Parse retry time from error message (e.g., "retry in 37.427166332s")
-          let delay = Math.pow(2, retryCount) * 2000 + Math.random() * 1000;
-          const retryMatch = errorMessage.match(/retry in (\d+\.?\d*)s/i);
-          if (retryMatch) {
-            delay = Math.ceil(parseFloat(retryMatch[1]) * 1000) + 1000; // Add 1 second buffer
-            console.log(`API suggests retry in ${retryMatch[1]}s, waiting ${delay}ms...`);
-          }
-
-          // Exponential backoff retry
-          if (retryCount < MAX_RETRIES) {
-            // Notify about wait time
-            if (this.onRetryWait) {
-              this.onRetryWait(Math.ceil(delay / 1000), retryCount + 1, MAX_RETRIES);
-            }
-
-            console.log(`Retrying in ${delay}ms...`);
-            await this._delay(delay);
-            return this._send(message, useGrounding, retryCount + 1);
-          }
+          return this._requestWithRetries(contents, useGrounding, retryCount + 1);
         }
 
-        throw new Error(errorMessage);
+        if (retryCount < MAX_RETRIES) {
+          const delay = this._getRetryDelay(errorMessage, retryCount);
+          if (this.onRetryWait) {
+            this.onRetryWait(Math.ceil(delay / 1000), retryCount + 1, MAX_RETRIES);
+          }
+
+          await this._delay(delay);
+          return this._requestWithRetries(contents, useGrounding, retryCount + 1);
+        }
       }
 
-      const data = await response.json();
-
-      // Extract response text
-      const assistantMessage = data.candidates?.[0]?.content;
-
-      if (!assistantMessage) {
-        throw new Error('Empty response from API');
-      }
-
-      // Add assistant response to history
-      this.conversationHistory.push(assistantMessage);
-
-      // Extract text from parts
-      const responseText = assistantMessage.parts
-        .map(part => part.text || '')
-        .join('');
-
-      // Extract grounding metadata if available
-      const groundingMetadata = data.candidates?.[0]?.groundingMetadata;
-
-      return {
-        text: responseText,
-        grounding: groundingMetadata,
-        fullResponse: data
-      };
-    } catch (error) {
-      // Remove the failed user message from history (only on final failure)
-      if (retryCount === 0 || retryCount >= MAX_RETRIES) {
-        this.conversationHistory.pop();
-      }
-      throw error;
+      throw apiError;
     }
+
+    const data = await response.json();
+    const assistantMessage = data.candidates?.[0]?.content;
+
+    if (!assistantMessage) {
+      const finishReason = data.candidates?.[0]?.finishReason;
+      throw new Error(finishReason ? `Gemini stopped without text: ${finishReason}` : 'Empty response from API');
+    }
+
+    const responseText = assistantMessage.parts
+      .map(part => part.text || '')
+      .join('');
+
+    const groundingMetadata = data.candidates?.[0]?.groundingMetadata;
+
+    return {
+      text: responseText,
+      grounding: groundingMetadata,
+      fullResponse: data,
+      assistantMessage
+    };
+  }
+
+  async _readError(response) {
+    try {
+      return await response.json();
+    } catch {
+      return {
+        error: {
+          message: await response.text().catch(() => response.statusText),
+          status: response.statusText
+        }
+      };
+    }
+  }
+
+  _buildApiError(response, errorData, errorMessage) {
+    const status = errorData.error?.status || response.statusText || 'UNKNOWN';
+    const message = `Gemini API ${response.status} ${status}: ${errorMessage}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.details = errorData;
+    return error;
+  }
+
+  _isRetryable(status, message) {
+    const normalized = message.toLowerCase();
+    return [429, 500, 502, 503, 504].includes(status)
+      || normalized.includes('quota')
+      || normalized.includes('rate')
+      || normalized.includes('exceeded')
+      || normalized.includes('overload')
+      || normalized.includes('high demand')
+      || normalized.includes('deadline');
+  }
+
+  _getFallbackModel() {
+    if (this.model.includes('gemini-3') || this.model.includes('pro-preview')) {
+      return 'gemini-2.5-flash';
+    }
+
+    if (this.model === 'gemini-2.5-flash') {
+      return 'gemini-2.5-flash-lite';
+    }
+
+    return null;
+  }
+
+  _getRetryDelay(message, retryCount) {
+    const retryMatch = message.match(/retry in (\d+\.?\d*)s/i);
+    if (retryMatch) {
+      return Math.ceil(parseFloat(retryMatch[1]) * 1000) + 1000;
+    }
+
+    return Math.pow(2, retryCount) * 2500 + Math.random() * 1000;
   }
 
   /**
@@ -167,7 +216,7 @@ export class GeminiService {
    * Get current conversation history for display
    */
   getHistory() {
-    return this.conversationHistory.map(msg => ({
+    return this.requestLog.map(msg => ({
       role: msg.role,
       text: msg.parts.map(p => p.text || '').join('')
     }));
@@ -177,7 +226,7 @@ export class GeminiService {
    * Get formatted conversation log for export
    */
   getLog() {
-    return this.conversationHistory.map(msg => {
+    return this.requestLog.map(msg => {
       const role = msg.role === 'user' ? 'USER' : 'MODEL';
       const text = msg.parts ? msg.parts.map(p => p.text).join('') : (msg.content || '');
       return `### ${role}:\n${text}\n\n`;
@@ -275,6 +324,8 @@ let serviceInstance = null;
 export function getGeminiService(apiKey, model) {
   if (!serviceInstance || (apiKey && serviceInstance.apiKey !== apiKey)) {
     serviceInstance = new GeminiService(apiKey, model);
+  } else if (model && serviceInstance.model !== model) {
+    serviceInstance.setModel(model);
   }
   return serviceInstance;
 }

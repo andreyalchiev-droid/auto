@@ -62,8 +62,19 @@ const state = {
   currentPromptsEditorState: [],
 };
 
+const supportedModels = new Set([
+  'gemini-3.1-pro-preview',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+]);
+
 // Initialize
 function init() {
+  if (!supportedModels.has(state.model)) {
+    state.model = 'gemini-2.5-flash';
+    localStorage.setItem('autimatiks_model', state.model);
+  }
+
   // Load saved settings
   elements.apiKeyInput.value = state.apiKey;
   elements.modelSelect.value = state.model;
@@ -225,6 +236,7 @@ async function handleStart() {
 
   } catch (error) {
     showToast(`Ошибка: ${error.message}`, 'error');
+    showPartialResult();
     hideStatusBar();
     resetUI();
   }
@@ -410,8 +422,43 @@ function formatMessage(text) {
 // Show Final Result
 function showFinalResult() {
   const result = state.pipeline.getFinalResult();
+  renderResult(result);
+  elements.continueBtn.style.display = 'none';
 
+  // Add Log Button if not exists
+  if (!document.getElementById('logBtn')) {
+    const btn = document.createElement('button');
+    btn.id = 'logBtn';
+    btn.className = 'secondary-btn';
+    btn.innerHTML = '<span>📜</span> Лог диалога';
+    btn.onclick = downloadLog;
+    btn.style.marginLeft = '10px';
+    document.querySelector('.results-actions').appendChild(btn);
+  }
+
+  resetUI();
+  showToast('Обработка завершена!', 'success');
+}
+
+function showPartialResult() {
+  if (!state.pipeline) return;
+
+  const result = state.pipeline.getFinalResult();
+  if (!result.title && !result.text) return;
+
+  elements.resultsSection.style.display = 'block';
+  renderResult(result, 'Частичный результат');
+}
+
+function renderResult(result, title = null) {
   let html = '';
+  if (title) {
+    html += `
+        <div style="margin-bottom: 20px;">
+          <h3 style="color: var(--accent-primary); margin-bottom: 10px;">${title}</h3>
+        </div>
+      `;
+  }
   if (result.title) {
     html += `
         <div style="margin-bottom: 20px;">
@@ -430,21 +477,6 @@ function showFinalResult() {
   }
 
   elements.resultsContent.innerHTML = html;
-  elements.continueBtn.style.display = 'none';
-
-  // Add Log Button if not exists
-  if (!document.getElementById('logBtn')) {
-    const btn = document.createElement('button');
-    btn.id = 'logBtn';
-    btn.className = 'secondary-btn';
-    btn.innerHTML = '<span>📜</span> Лог диалога';
-    btn.onclick = downloadLog;
-    btn.style.marginLeft = '10px';
-    document.querySelector('.results-actions').appendChild(btn);
-  }
-
-  resetUI();
-  showToast('Обработка завершена!', 'success');
 }
 
 function downloadLog() {

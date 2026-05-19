@@ -23,6 +23,7 @@ export class Pipeline {
         this.onMessage = null;
         this.onTyping = null;
         this.isWaitingForReview = false;
+        this.requestDelayMs = 1500;
     }
 
     /**
@@ -67,6 +68,9 @@ export class Pipeline {
 
             this._emitStageChange(this.currentStageIndex + 1, 'completed');
             this.currentStageIndex++;
+            if (this.currentStageIndex < this.prompts.length) {
+                await this._delay(this.requestDelayMs);
+            }
             await this.runNextStage();
         } catch (error) {
             this._emitProgress(`Ошибка: ${error.message}`);
@@ -79,26 +83,19 @@ export class Pipeline {
         this._emitMessage('user', combinedMessage);
         this._emitProgress('Поиск информации в Google...');
 
-        const result = await this.gemini.sendWithSearch(combinedMessage);
+        const result = await this.gemini.sendWithSearch(combinedMessage, { useHistory: false });
         this._emitMessage('assistant', result.text);
 
-        // Search usually returns info, which the next standard stage applies.
-        // We'll just update current text so it can be optionally used, 
-        //, but keeping conversation history makes next standard stages contextual either way.
-        this.currentText = result.text;
+        this.stageResults.research = result.text;
     }
 
     async runStandardStage(prompt) {
-        // First stage might need the source text if not using conversational context automatically.
-        let message = prompt.text;
-        if (this.currentStageIndex === 0) {
-            message = `${prompt.text}\n\nВот текст:\n\n${this.originalText}`;
-        }
+        const message = this._buildStandardStageMessage(prompt);
 
         this._emitMessage('user', message);
         this._emitProgress('Обработка...');
 
-        const result = await this.gemini.send(message);
+        const result = await this.gemini.send(message, { useHistory: false });
         this._emitMessage('assistant', result.text);
 
         if (prompt.id === 'title') {
@@ -117,36 +114,30 @@ export class Pipeline {
 
         this._emitProgress(`Разбито на ${this.chunks.length} блоков. Начинаю редактирование...`);
 
-        // First batch
-        const firstBatch = this.chunks.slice(0, 2);
-        const firstMessage = `${prompt.text}\n\nВот первые блоки текста:\n\n${firstBatch.join('\n\n---\n\n')}`;
-
-        this._emitMessage('user', firstMessage);
-        let result = await this.gemini.send(firstMessage);
-        this._emitMessage('assistant', result.text);
-        editedChunks.push(result.text);
-
-        this.currentChunkIndex = 2;
-
         while (this.currentChunkIndex < this.chunks.length) {
             const batchSize = Math.min(2, this.chunks.length - this.currentChunkIndex);
             const batch = this.chunks.slice(this.currentChunkIndex, this.currentChunkIndex + batchSize);
 
             this._emitProgress(`Обработка блоков ${this.currentChunkIndex + 1}-${this.currentChunkIndex + batchSize} из ${this.chunks.length}...`);
 
-            const message = `Продолжай редактировать. Вот следующие блоки текста.\n\n${batch.join('\n\n---\n\n')}`;
+            const message = this._buildChunkStageMessage(prompt, textToProcess, batch, editedChunks);
             this._emitMessage('user', message);
 
-            result = await this.gemini.send(message);
+            const result = await this.gemini.send(message, { useHistory: false });
             this._emitMessage('assistant', result.text);
             editedChunks.push(result.text);
+            this.stageResults.editedChunks = editedChunks;
+            this.stageResults.body = editedChunks.join('\n\n---\n\n');
             this.currentChunkIndex += batchSize;
 
-            await this._delay(500);
+            if (this.currentChunkIndex < this.chunks.length) {
+                await this._delay(this.requestDelayMs);
+            }
         }
 
         this.currentText = editedChunks.join('\n\n---\n\n');
         this.stageResults.editedChunks = editedChunks;
+        this.stageResults.body = this.currentText;
     }
 
     async runCombineStage(prompt) {
@@ -159,12 +150,20 @@ export class Pipeline {
             combinedChunks = this.currentText;
         }
 
-        const message = `${prompt.text}\n\nВОТ МАТЕРИАЛ ДЛЯ ОБЪЕДИНЕНИЯ:\n\n${combinedChunks}`;
+        const message = `${prompt.text}
+
+ИСХОДНЫЙ ТЕКСТ ДЛЯ КОНТЕКСТА:
+
+${this.originalText}
+
+ВОТ МАТЕРИАЛ ДЛЯ ОБЪЕДИНЕНИЯ:
+
+${combinedChunks}`;
 
         this._emitMessage('user', message);
         this._emitProgress('Объединение...');
 
-        const result = await this.gemini.send(message);
+        const result = await this.gemini.send(message, { useHistory: false });
         this._emitMessage('assistant', result.text);
 
         this.currentText = result.text;
@@ -177,6 +176,67 @@ export class Pipeline {
             text: this.stageResults.body || this.currentText || '',
             original: this.originalText
         };
+    }
+
+    _buildStandardStageMessage(prompt) {
+        if (prompt.id === 'researchApply') {
+            return `${prompt.text}
+
+ИСХОДНЫЙ ТЕКСТ:
+
+${this.originalText}
+
+РЕЗУЛЬТАТЫ ПОИСКА И ПРОВЕРКИ:
+
+${this.stageResults.research || 'Нет отдельного результата поиска.'}`;
+        }
+
+        if (prompt.id === 'title') {
+            return `${prompt.text}
+
+КОНТЕКСТ ИСХОДНОГО ТЕКСТА:
+
+${this.originalText}
+
+ИТОГОВЫЙ ТЕКСТ:
+
+${this.currentText}`;
+        }
+
+        return `${prompt.text}
+
+ИСХОДНЫЙ ТЕКСТ ДЛЯ ОБЩЕГО КОНТЕКСТА:
+
+${this.originalText}
+
+ТЕКУЩИЙ РАБОЧИЙ ТЕКСТ:
+
+${this.currentText || this.originalText}`;
+    }
+
+    _buildChunkStageMessage(prompt, fullText, batch, editedChunks) {
+        const processedText = editedChunks.length
+            ? editedChunks.map((chunk, index) => `[Уже готовый блок ${index + 1}]\n${chunk}`).join('\n\n')
+            : 'Пока нет обработанных блоков.';
+
+        return `${prompt.text}
+
+ВАЖНО:
+- Учитывай весь исходный текст и уже готовые блоки.
+- Сейчас редактируй только текущие блоки.
+- Не пересобирай заново уже готовые блоки, используй их как контекст.
+
+ПОЛНЫЙ ТЕКСТ ДЛЯ ОБЩЕГО КОНТЕКСТА:
+
+${fullText}
+
+УЖЕ ОБРАБОТАННЫЕ БЛОКИ:
+
+${processedText}
+
+ТЕКУЩИЕ БЛОКИ ДЛЯ РЕДАКТИРОВАНИЯ:
+
+${batch.join('\n\n---\n\n')}`;
     }
 
     async continue() {
