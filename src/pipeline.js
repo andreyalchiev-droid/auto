@@ -112,7 +112,7 @@ ${this.currentText}`;
 
     async runChunkedStage(prompt) {
         const textToProcess = this.currentText || this.originalText;
-        this.chunks = chunkText(textToProcess, 200, 500);
+        this.chunks = chunkText(textToProcess, 650, 1100);
         this.currentChunkIndex = 0;
         let editedChunks = [];
 
@@ -120,10 +120,13 @@ ${this.currentText}`;
 
         while (this.currentChunkIndex < this.chunks.length) {
             const chunk = this.chunks[this.currentChunkIndex];
+            const previousChunk = this.currentChunkIndex > 0
+                ? this.chunks[this.currentChunkIndex - 1]
+                : '';
 
             this._emitProgress(`Обработка блока ${this.currentChunkIndex + 1} из ${this.chunks.length}...`);
 
-            const result = await this._sendChunk(prompt, chunk);
+            const result = await this._sendChunkWithSafetySplit(prompt, chunk, previousChunk);
             editedChunks.push(result.text);
 
             this.stageResults.editedChunks = editedChunks;
@@ -140,8 +143,53 @@ ${this.currentText}`;
         this.stageResults.body = this.currentText;
     }
 
-    async _sendChunk(prompt, chunk) {
-        const message = this._buildChunkStageMessage(prompt, chunk);
+    async _sendChunkWithSafetySplit(prompt, chunk, previousChunk, depth = 0) {
+        try {
+            return await this._sendChunk(prompt, chunk, previousChunk);
+        } catch (error) {
+            if (!this._isProhibitedContentError(error)) {
+                throw error;
+            }
+
+            if (previousChunk) {
+                this._emitProgress(`Gemini заблокировал блок ${this.currentChunkIndex + 1} с предыдущим контекстом. Пробую без предыдущего контекста...`);
+                try {
+                    return await this._sendChunk(prompt, chunk, '');
+                } catch (retryError) {
+                    if (!this._isProhibitedContentError(retryError)) {
+                        throw retryError;
+                    }
+                    error = retryError;
+                    previousChunk = '';
+                }
+            }
+
+            const fallbackChunks = chunkText(chunk, 250, 550);
+
+            if (depth >= 2 || fallbackChunks.length <= 1) {
+                throw error;
+            }
+
+            this._emitProgress(`Gemini заблокировал блок ${this.currentChunkIndex + 1}. Делю его на ${fallbackChunks.length} меньшие части...`);
+
+            const editedParts = [];
+            let previousPart = previousChunk;
+
+            for (let i = 0; i < fallbackChunks.length; i++) {
+                this._emitProgress(`Повтор блока ${this.currentChunkIndex + 1}: часть ${i + 1} из ${fallbackChunks.length}...`);
+                const result = await this._sendChunkWithSafetySplit(prompt, fallbackChunks[i], previousPart, depth + 1);
+                editedParts.push(result.text);
+                previousPart = fallbackChunks[i];
+            }
+
+            return {
+                text: editedParts.join('\n\n---\n\n')
+            };
+        }
+    }
+
+    async _sendChunk(prompt, chunk, previousChunk = '') {
+        const message = this._buildChunkStageMessage(prompt, chunk, previousChunk);
         this._emitMessage('user', message);
 
         try {
@@ -149,7 +197,7 @@ ${this.currentText}`;
             this._emitMessage('assistant', result.text);
             return result;
         } catch (error) {
-            if (this._isProhibitedContentError(error)) {
+            if (this._isProhibitedContentError(error) && !error.message.includes(`блок ${this.currentChunkIndex + 1}`)) {
                 error.message = `Gemini заблокировал блок ${this.currentChunkIndex + 1}: ${error.message}`;
             }
             throw error;
@@ -230,9 +278,9 @@ ${this.originalText}
 ${this.currentText || this.originalText}`;
     }
 
-    _buildChunkStageMessage(prompt, chunk) {
-        const previousOriginalBlock = this.currentChunkIndex > 0
-            ? this._formatPreviousBlock(this.chunks[this.currentChunkIndex - 1])
+    _buildChunkStageMessage(prompt, chunk, previousChunk = '') {
+        const previousOriginalBlock = previousChunk
+            ? this._formatPreviousBlock(previousChunk)
             : 'Нет.';
 
         return `${prompt.text}${this._getOutputRule(prompt)}

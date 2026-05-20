@@ -330,63 +330,69 @@ export class GeminiService {
 /**
  * Text chunker - splits text into semantic blocks
  */
-export function chunkText(text, minSize = 200, maxSize = 500) {
+export function chunkText(text, minSize = 650, maxSize = 1100) {
   const chunks = [];
-
-  // Split by double newlines (paragraphs) first
-  const paragraphs = text.split(/\n\s*\n/);
-
   let currentChunk = '';
+
+  const paragraphs = text.split(/\n\s*\n/);
 
   for (const paragraph of paragraphs) {
     const trimmed = paragraph.trim();
     if (!trimmed) continue;
 
-    // If adding this paragraph would exceed maxSize, save current and start new
-    if (currentChunk && (currentChunk.length + trimmed.length + 2) > maxSize) {
-      if (currentChunk.length >= minSize) {
-        chunks.push(currentChunk.trim());
-        currentChunk = trimmed;
-      } else {
-        // Current chunk too small, try to split paragraph by sentences
-        currentChunk += '\n\n' + trimmed;
-      }
-    } else {
-      currentChunk += (currentChunk ? '\n\n' : '') + trimmed;
-    }
-
-    // If current chunk exceeds maxSize, we need to split it
-    if (currentChunk.length > maxSize) {
-      const sentenceChunks = splitBySentences(currentChunk, minSize, maxSize);
-      if (sentenceChunks.length > 1) {
-        chunks.push(...sentenceChunks.slice(0, -1));
-        currentChunk = sentenceChunks[sentenceChunks.length - 1];
-      }
+    const paragraphChunks = splitParagraphIntoChunks(trimmed, minSize, maxSize);
+    for (let i = 0; i < paragraphChunks.length; i++) {
+      const separator = i === 0 ? '\n\n' : ' ';
+      currentChunk = appendSemanticChunk(chunks, currentChunk, paragraphChunks[i], separator, minSize, maxSize);
     }
   }
 
-  // Don't forget the last chunk
   if (currentChunk.trim()) {
     chunks.push(currentChunk.trim());
   }
 
-  return chunks;
+  return mergeSmallChunks(chunks, minSize, maxSize);
 }
 
-/**
- * Helper to split by sentences
- */
-function splitBySentences(text, minSize, maxSize) {
-  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+function appendSemanticChunk(chunks, currentChunk, nextPart, separator, minSize, maxSize) {
+  if (!currentChunk) return nextPart.trim();
+
+  const joined = `${currentChunk}${separator}${nextPart}`.trim();
+  if (joined.length <= maxSize) return joined;
+
+  if (currentChunk.length >= minSize) {
+    chunks.push(currentChunk.trim());
+    return nextPart.trim();
+  }
+
+  return joined;
+}
+
+function splitParagraphIntoChunks(paragraph, minSize, maxSize) {
+  if (paragraph.length <= maxSize) return [paragraph];
+
+  const sentences = splitIntoSentences(paragraph)
+    .flatMap(sentence => splitLongSentence(sentence, maxSize));
+
   const chunks = [];
   let current = '';
+  const preferredSize = Math.round((minSize + maxSize) / 2);
 
   for (const sentence of sentences) {
-    if ((current + sentence).length > maxSize && current.length >= minSize) {
+    const separator = current ? ' ' : '';
+    const joined = `${current}${separator}${sentence}`.trim();
+
+    if (current && current.length >= minSize && joined.length > maxSize) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else if (current
+      && current.length >= minSize
+      && joined.length > preferredSize
+      && startsNewIdea(sentence)) {
       chunks.push(current.trim());
       current = sentence;
     } else {
-      current += sentence;
+      current = joined;
     }
   }
 
@@ -395,6 +401,76 @@ function splitBySentences(text, minSize, maxSize) {
   }
 
   return chunks;
+}
+
+function mergeSmallChunks(chunks, minSize, maxSize) {
+  const softMaxSize = Math.round(maxSize * 1.2);
+  const merged = [];
+
+  for (const chunk of chunks) {
+    const trimmed = chunk.trim();
+    if (!trimmed) continue;
+
+    if (merged.length === 0) {
+      merged.push(trimmed);
+      continue;
+    }
+
+    const previous = merged[merged.length - 1];
+    const joined = `${previous} ${trimmed}`.trim();
+
+    if ((trimmed.length < minSize || previous.length < minSize) && joined.length <= softMaxSize) {
+      merged[merged.length - 1] = joined;
+    } else {
+      merged.push(trimmed);
+    }
+  }
+
+  return merged;
+}
+
+function splitIntoSentences(text) {
+  const matches = text.match(/[^.!?…]+(?:[.!?…]+["'»“”‘’)\]]*)?/gu);
+  return (matches || [text])
+    .map(sentence => sentence.trim())
+    .filter(Boolean);
+}
+
+function splitLongSentence(sentence, maxSize) {
+  if (sentence.length <= maxSize) return [sentence];
+
+  const parts = sentence
+    .split(/([,;:]\s+|—\s+|\s+-\s+)/)
+    .reduce((acc, part, index, source) => {
+      if (index % 2 === 0) {
+        acc.push(part + (source[index + 1] || ''));
+      }
+      return acc;
+    }, [])
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length <= 1) return [sentence];
+
+  const chunks = [];
+  let current = '';
+
+  for (const part of parts) {
+    const joined = `${current}${current ? ' ' : ''}${part}`.trim();
+    if (current && joined.length > maxSize) {
+      chunks.push(current.trim());
+      current = part;
+    } else {
+      current = joined;
+    }
+  }
+
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+function startsNewIdea(sentence) {
+  return /^(но|потом|затем|после этого|на следующий день|вчера|сегодня|когда|и когда|по итогу|в общем|сразу|во-первых|ну, если|так что|причём|поэтому)\b/i.test(sentence.trim());
 }
 
 // Singleton instance
